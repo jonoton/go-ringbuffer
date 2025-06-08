@@ -6,7 +6,8 @@ Package `ringbuffer` provides a generic, thread-safe, fixed-size circular buffer
 
 The `RingBuffer` is designed for concurrent producer-consumer scenarios. It allows multiple goroutines to safely add and retrieve items without requiring manual locking. When the buffer reaches its capacity, new items will overwrite the oldest ones.
 
-It uses Go's generics, allowing it to store elements of any type. Thread safety is achieved internally by using channels to serialize access, which also allows the `Get()` operation to block until an item is available.
+It uses Go's generics, allowing it to store elements of any type. Thread safety is
+achieved internally by using channels to serialize access.
 
 ## Usage
 
@@ -34,4 +35,24 @@ go func() {
 	item2 := rb.g.Get() // "world"
 	fmt.Println(item1, item2)
 }()
+```
+
+Automatic Cleanup:
+
+Types that require cleanup (e.g., to release file handles or network connections)
+can implement the `Cleanable` interface. The `Cleanup()` method will be called
+automatically when an item is overwritten or when `Stop()` is called on the buffer.
+
+```go
+type MyResource struct {
+	// ... fields
+}
+
+func (r *MyResource) Cleanup() {
+	fmt.Println("Cleaning up MyResource!")
+	// ... release resources here
+}
+
+rb := ringbuffer.New[*MyResource](5)
+rb.Add(&MyResource{}) // This item's Cleanup() will be called later.
 ```

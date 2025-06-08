@@ -127,8 +127,6 @@ func TestStop(t *testing.T) {
 	finalGoRoutines := runtime.NumGoroutine()
 
 	// If Stop() worked, the number of goroutines should be back to the initial count.
-	// The original check 'finalGoRoutines >= initialGoRoutines' was incorrect, as it
-	// would fail when final == initial (the success case).
 	// A small grace is given for other potential runtime goroutines.
 	if finalGoRoutines > initialGoRoutines {
 		t.Errorf("Stop() did not terminate the background goroutine; initial: %d, final: %d", initialGoRoutines, finalGoRoutines)
@@ -238,5 +236,96 @@ func TestEmptyBufferGet(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 		// This is the expected outcome: Get() is still blocking.
 		fmt.Println("TestEmptyBufferGet: Get() correctly blocked.")
+	}
+}
+
+// --- Tests for Cleanable Interface ---
+
+// resource is a test struct that implements the Cleanable interface.
+type resource struct {
+	ID        int
+	cleanedUp chan int // A channel to signal when Cleanup is called.
+}
+
+// Cleanup implements the Cleanable interface.
+func (r *resource) Cleanup() {
+	// Send the ID to the channel to confirm cleanup was called for this specific resource.
+	r.cleanedUp <- r.ID
+}
+
+// TestCleanupOnOverwrite verifies that Cleanup() is called on the oldest item when the buffer is full.
+func TestCleanupOnOverwrite(t *testing.T) {
+	cleanedUp := make(chan int, 1)
+	r1 := &resource{ID: 1, cleanedUp: cleanedUp}
+	r2 := &resource{ID: 2, cleanedUp: cleanedUp}
+
+	rb := New[*resource](1)
+	defer rb.Stop()
+
+	rb.Add(r1) // Buffer is now full.
+	rb.Add(r2) // This should overwrite r1 and trigger its Cleanup.
+
+	select {
+	case id := <-cleanedUp:
+		if id != 1 {
+			t.Errorf("expected resource with ID 1 to be cleaned up, but got ID %d", id)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Cleanup() was not called on overwrite")
+	}
+}
+
+// TestCleanupOnStop verifies that Cleanup() is called for all remaining items when Stop() is called.
+func TestCleanupOnStop(t *testing.T) {
+	size := 5
+	cleanedUp := make(chan int, size)
+	resources := make([]*resource, size)
+
+	rb := New[*resource](size)
+	for i := 0; i < size; i++ {
+		resources[i] = &resource{ID: i, cleanedUp: cleanedUp}
+		rb.Add(resources[i])
+	}
+
+	rb.Stop()
+
+	cleanedCount := 0
+	cleanedIDs := make(map[int]bool)
+	timeout := time.After(100 * time.Millisecond)
+
+	for i := 0; i < size; i++ {
+		select {
+		case id := <-cleanedUp:
+			cleanedCount++
+			cleanedIDs[id] = true
+		case <-timeout:
+			t.Fatalf("timed out waiting for cleanup. Expected %d cleanups, but got %d", size, cleanedCount)
+		}
+	}
+
+	if cleanedCount != size {
+		t.Errorf("expected %d resources to be cleaned up on Stop(), but got %d", size, cleanedCount)
+	}
+}
+
+// --- Tests for New() Behavior ---
+
+// TestNewDefaultSize verifies that New() defaults to a size of 1 for non-positive input.
+func TestNewDefaultSize(t *testing.T) {
+	testCases := []int{0, -1, -10}
+
+	for _, size := range testCases {
+		t.Run(fmt.Sprintf("size_%d", size), func(t *testing.T) {
+			rb := New[int](size)
+			defer rb.Stop()
+			if len(rb.data) != 1 {
+				t.Errorf("expected buffer size to default to 1 for input %d, but got %d", size, len(rb.data))
+			}
+			// Sanity check that it works
+			rb.Add(100)
+			if got := rb.Get(); got != 100 {
+				t.Errorf("buffer with default size did not work correctly, expected 100, got %d", got)
+			}
+		})
 	}
 }

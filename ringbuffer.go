@@ -1,5 +1,13 @@
 package ringbuffer
 
+// Cleanable is an interface for types that require explicit cleanup
+// when they are dropped from the RingBuffer (either by being overwritten
+// or when Stop() is called).
+type Cleanable interface {
+	// Cleanup performs any necessary resource release.
+	Cleanup()
+}
+
 // RingBuffer is a generic, thread-safe ring buffer.
 type RingBuffer[T any] struct {
 	data []T
@@ -17,7 +25,8 @@ type RingBuffer[T any] struct {
 	done    chan struct{}
 }
 
-// New creates a new RingBuffer with the given size. The size must be positive.
+// New creates a new RingBuffer with the given size. If the provided size
+// is less than 1, it defaults to a size of 1.
 func New[T any](size int) *RingBuffer[T] {
 	if size <= 0 {
 		size = 1
@@ -46,6 +55,7 @@ func (rb *RingBuffer[T]) Get() T {
 }
 
 // Stop gracefully shuts down the ring buffer's background goroutine.
+// It will also call Cleanup() on any remaining items that implement the Cleanable interface.
 func (rb *RingBuffer[T]) Stop() {
 	close(rb.done)
 }
@@ -73,6 +83,16 @@ func (rb *RingBuffer[T]) run() {
 
 		select {
 		case item := <-rb.addChan:
+			// If the buffer is full, the item at the current head position
+			// is about to be overwritten. Clean it up if it's Cleanable.
+			if rb.isFull {
+				// We use 'any' to convert the generic T to an interface
+				// type so we can perform the type assertion.
+				if cleanable, ok := any(rb.data[rb.head]).(Cleanable); ok {
+					cleanable.Cleanup()
+				}
+			}
+
 			// A producer sent a new item. Store it at the head.
 			rb.data[rb.head] = item
 			rb.head = (rb.head + 1) % len(rb.data)
@@ -93,7 +113,23 @@ func (rb *RingBuffer[T]) run() {
 			rb.isFull = false
 
 		case <-rb.done:
-			// The stop signal was received. Exit the goroutine.
+			// The stop signal was received. Clean up any remaining items
+			// in the buffer before exiting the goroutine.
+			if rb.isFull {
+				// If the buffer is full, every slot has an item to check.
+				for i := 0; i < len(rb.data); i++ {
+					if cleanable, ok := any(rb.data[i]).(Cleanable); ok {
+						cleanable.Cleanup()
+					}
+				}
+			} else {
+				// If not full, iterate from the tail to the head.
+				for i := rb.tail; i != rb.head; i = (i + 1) % len(rb.data) {
+					if cleanable, ok := any(rb.data[i]).(Cleanable); ok {
+						cleanable.Cleanup()
+					}
+				}
+			}
 			return
 		}
 	}

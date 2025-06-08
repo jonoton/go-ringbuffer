@@ -6,8 +6,7 @@ multiple goroutines to safely add and retrieve items. When the buffer reaches it
 capacity, new items will overwrite the oldest ones.
 
 It uses Go's generics, allowing it to store elements of any type. Thread safety is
-achieved internally by using channels to serialize access, eliminating the need for
-explicit locking by the user.
+achieved internally by using channels to serialize access.
 
 Usage:
 
@@ -31,5 +30,23 @@ until an item is available:
 		item2 := rb.Get() // "world"
 		fmt.Println(item1, item2)
 	}()
+
+Automatic Cleanup:
+
+Types that require cleanup (e.g., to release file handles or network connections)
+can implement the `Cleanable` interface. The `Cleanup()` method will be called
+automatically when an item is overwritten or when `Stop()` is called on the buffer.
+
+	type MyResource struct {
+		// ... fields
+	}
+
+	func (r *MyResource) Cleanup() {
+		fmt.Println("Cleaning up MyResource!")
+		// ... release resources here
+	}
+
+	rb := ringbuffer.New[*MyResource](5)
+	rb.Add(&MyResource{}) // This item's Cleanup() will be called later.
 */
 package ringbuffer
