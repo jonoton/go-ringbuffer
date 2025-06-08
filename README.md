@@ -32,7 +32,7 @@ Retrieve items from one or more goroutines. The Get() call will block until an i
 ```go
 go func() {
 	item1 := rb.Get() // "hello"
-	item2 := rb.g.Get() // "world"
+	item2 := rb.Get() // "world"
 	fmt.Println(item1, item2)
 }()
 ```
