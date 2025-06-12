@@ -8,7 +8,15 @@ type Cleanable interface {
 	Cleanup()
 }
 
-// RingBuffer is a generic, thread-safe ring buffer.
+// tryGetResponse is a private struct used to send the result
+// of a TryGet operation back to the caller.
+type tryGetResponse[T any] struct {
+	item T
+	ok   bool
+}
+
+// RingBuffer is a generic, thread-safe ring buffer. It is designed for
+// concurrent producer-consumer scenarios and uses channels to serialize access.
 type RingBuffer[T any] struct {
 	data []T
 	// head is the index where the next item will be added.
@@ -20,9 +28,11 @@ type RingBuffer[T any] struct {
 	isFull bool
 
 	// Channels for thread-safe operations
-	addChan chan T
-	getChan chan T
-	done    chan struct{}
+	addChan    chan T
+	getChan    chan T
+	tryGetChan chan chan tryGetResponse[T] // Channel for non-blocking get requests
+	getAllChan chan chan []T               // Channel for getting all items
+	done       chan struct{}
 }
 
 // New creates a new RingBuffer with the given size. If the provided size
@@ -32,10 +42,12 @@ func New[T any](size int) *RingBuffer[T] {
 		size = 1
 	}
 	rb := &RingBuffer[T]{
-		data:    make([]T, size),
-		addChan: make(chan T),
-		getChan: make(chan T),
-		done:    make(chan struct{}),
+		data:       make([]T, size),
+		addChan:    make(chan T),
+		getChan:    make(chan T),
+		tryGetChan: make(chan chan tryGetResponse[T]),
+		getAllChan: make(chan chan []T),
+		done:       make(chan struct{}),
 	}
 
 	go rb.run()
@@ -48,10 +60,30 @@ func (rb *RingBuffer[T]) Add(item T) {
 	rb.addChan <- item
 }
 
-// Get retrieves an item from the ring buffer. This operation is thread-safe.
-// It will block until an item is available.
+// Get retrieves an item from the ring buffer. This operation is thread-safe and
+// will block until an item is available.
 func (rb *RingBuffer[T]) Get() T {
 	return <-rb.getChan
+}
+
+// TryGet attempts to retrieve an item from the ring buffer without blocking.
+// If the buffer is not empty, it returns the oldest item and true.
+// If the buffer is empty, it returns the zero value for the type and false.
+func (rb *RingBuffer[T]) TryGet() (T, bool) {
+	respChan := make(chan tryGetResponse[T], 1)
+	rb.tryGetChan <- respChan
+	resp := <-respChan
+	return resp.item, resp.ok
+}
+
+// GetAll retrieves and removes all items currently in the buffer, returning them
+// as a slice ordered from oldest to newest. It does not block. The buffer will
+// be empty after this call. This operation does not trigger the Cleanup method
+// on the retrieved items.
+func (rb *RingBuffer[T]) GetAll() []T {
+	respChan := make(chan []T, 1)
+	rb.getAllChan <- respChan
+	return <-respChan
 }
 
 // Stop gracefully shuts down the ring buffer's background goroutine.
@@ -64,66 +96,100 @@ func (rb *RingBuffer[T]) Stop() {
 // It uses a nil channel to disable the 'get' case when the buffer is empty,
 // preventing deadlocks and ensuring the 'done' signal is always received.
 func (rb *RingBuffer[T]) run() {
-	// outputChan is used to send items to consumers. It's nil when the buffer
-	// is empty to disable the corresponding select case.
 	var outputChan chan T
-	// currentItem holds the next item to be sent from the tail of the buffer.
 	var currentItem T
 
 	for {
-		// Before selecting an operation, determine the buffer's state.
-		// If the buffer is empty, disable the output channel.
+		// Before the select, determine if the buffer has items to send.
 		if !rb.isFull && rb.head == rb.tail {
+			// Buffer is empty, so disable the 'Get' case by setting the channel to nil.
+			// A send to a nil channel blocks forever.
 			outputChan = nil
 		} else {
-			// Otherwise, prepare the next item for retrieval and enable the output channel.
+			// Buffer has items, so prepare the next item and enable the 'Get' case.
 			currentItem = rb.data[rb.tail]
 			outputChan = rb.getChan
 		}
 
 		select {
 		case item := <-rb.addChan:
-			// If the buffer is full, the item at the current head position
-			// is about to be overwritten. Clean it up if it's Cleanable.
+			// An item was added.
 			if rb.isFull {
-				// We use 'any' to convert the generic T to an interface
-				// type so we can perform the type assertion.
+				// If full, the item at the head is about to be overwritten.
+				// We must clean it up first if it implements Cleanable.
 				if cleanable, ok := any(rb.data[rb.head]).(Cleanable); ok {
 					cleanable.Cleanup()
 				}
 			}
-
-			// A producer sent a new item. Store it at the head.
+			// Store the new item.
 			rb.data[rb.head] = item
 			rb.head = (rb.head + 1) % len(rb.data)
-
-			// If the buffer was already full, the oldest item was just
-			// overwritten, so we also need to advance the tail to follow the head.
 			if rb.isFull {
+				// If we overwrote an item, the tail must follow the head.
 				rb.tail = rb.head
 			} else if rb.head == rb.tail {
-				// The buffer has just become full.
+				// The buffer is now full.
 				rb.isFull = true
 			}
 
 		case outputChan <- currentItem:
-			// An item was successfully sent to a consumer. Advance the tail.
+			// An item was successfully sent to a 'Get' consumer.
 			rb.tail = (rb.tail + 1) % len(rb.data)
-			// The buffer cannot be full after a successful get.
 			rb.isFull = false
 
-		case <-rb.done:
-			// The stop signal was received. Clean up any remaining items
-			// in the buffer before exiting the goroutine.
+		case respChan := <-rb.tryGetChan:
+			// A non-blocking 'TryGet' request was received.
+			if !rb.isFull && rb.head == rb.tail {
+				// Buffer is empty, respond immediately.
+				respChan <- tryGetResponse[T]{ok: false}
+			} else {
+				// Buffer has an item, send it and advance the tail.
+				itemToReturn := rb.data[rb.tail]
+				rb.tail = (rb.tail + 1) % len(rb.data)
+				rb.isFull = false
+				respChan <- tryGetResponse[T]{item: itemToReturn, ok: true}
+			}
+
+		case respChan := <-rb.getAllChan:
+			// A 'GetAll' request was received.
+			if !rb.isFull && rb.head == rb.tail {
+				respChan <- nil
+				continue
+			}
+
+			// Copy items from tail to head into a new slice.
+			var items []T
 			if rb.isFull {
-				// If the buffer is full, every slot has an item to check.
+				items = make([]T, len(rb.data))
+				copied := copy(items, rb.data[rb.tail:])
+				copy(items[copied:], rb.data[:rb.tail])
+			} else {
+				if rb.head > rb.tail {
+					items = make([]T, rb.head-rb.tail)
+					copy(items, rb.data[rb.tail:rb.head])
+				} else { // Wrapped
+					items = make([]T, len(rb.data)-rb.tail+rb.head)
+					copied := copy(items, rb.data[rb.tail:])
+					copy(items[copied:], rb.data[:rb.head])
+				}
+			}
+
+			// Reset buffer state to empty.
+			rb.tail = rb.head
+			rb.isFull = false
+
+			respChan <- items
+
+		case <-rb.done:
+			// A 'Stop' request was received.
+			// Clean up any remaining items in the buffer before exiting.
+			if rb.isFull {
 				for i := 0; i < len(rb.data); i++ {
 					if cleanable, ok := any(rb.data[i]).(Cleanable); ok {
 						cleanable.Cleanup()
 					}
 				}
 			} else {
-				// If not full, iterate from the tail to the head.
 				for i := rb.tail; i != rb.head; i = (i + 1) % len(rb.data) {
 					if cleanable, ok := any(rb.data[i]).(Cleanable); ok {
 						cleanable.Cleanup()

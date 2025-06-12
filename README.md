@@ -37,6 +37,28 @@ go func() {
 }()
 ```
 
+Non-Blocking and Batch Operations:
+
+The buffer also provides non-blocking and batch retrieval methods.
+
+TryGet attempts to retrieve an item without blocking. If the buffer is empty,
+it returns the zero value for the type and false.
+
+```go
+if item, ok := rb.TryGet(); ok {
+	// An item was successfully retrieved and can be processed.
+	fmt.Printf("Got item: %v\n", item)
+}
+```
+
+GetAll atomically retrieves and removes all items from the buffer, returning
+them as a slice. This operation does not block.
+
+```go
+allItems := rb.GetAll()
+fmt.Printf("Retrieved %d items at once.\n", len(allItems))
+```
+
 Automatic Cleanup:
 
 Types that require cleanup (e.g., to release file handles or network connections)

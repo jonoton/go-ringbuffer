@@ -329,3 +329,121 @@ func TestNewDefaultSize(t *testing.T) {
 		})
 	}
 }
+
+// --- Tests for TryGet and GetAll ---
+
+func TestTryGet(t *testing.T) {
+	rb := New[int](2)
+	defer rb.Stop()
+
+	// 1. TryGet on empty buffer
+	item, ok := rb.TryGet()
+	if ok {
+		t.Error("TryGet should return ok=false for an empty buffer")
+	}
+	if item != 0 { // Zero value for int
+		t.Errorf("TryGet should return zero value for item on empty buffer, got %d", item)
+	}
+
+	// 2. Add an item and TryGet it
+	rb.Add(123)
+	item, ok = rb.TryGet()
+	if !ok {
+		t.Error("TryGet should return ok=true when an item is available")
+	}
+	if item != 123 {
+		t.Errorf("TryGet returned wrong item, expected 123, got %d", item)
+	}
+
+	// 3. Buffer should be empty again
+	_, ok = rb.TryGet()
+	if ok {
+		t.Error("TryGet should return ok=false after buffer is emptied")
+	}
+}
+
+func TestGetAll(t *testing.T) {
+	t.Run("EmptyBuffer", func(t *testing.T) {
+		rb := New[int](5)
+		defer rb.Stop()
+		items := rb.GetAll()
+		if len(items) != 0 {
+			t.Errorf("expected 0 items for an empty buffer, got %d", len(items))
+		}
+	})
+
+	t.Run("PartiallyFullNotWrapped", func(t *testing.T) {
+		rb := New[int](5)
+		defer rb.Stop()
+		rb.Add(1)
+		rb.Add(2)
+		rb.Add(3)
+		items := rb.GetAll()
+		expected := []int{1, 2, 3}
+		if !reflect.DeepEqual(items, expected) {
+			t.Errorf("expected %v, got %v", expected, items)
+		}
+		// Buffer should be empty now
+		_, ok := rb.TryGet()
+		if ok {
+			t.Error("buffer should be empty after GetAll")
+		}
+	})
+
+	t.Run("FullBuffer", func(t *testing.T) {
+		rb := New[int](3)
+		defer rb.Stop()
+		rb.Add(1)
+		rb.Add(2)
+		rb.Add(3)
+		items := rb.GetAll()
+		expected := []int{1, 2, 3}
+		if !reflect.DeepEqual(items, expected) {
+			t.Errorf("expected %v, got %v", expected, items)
+		}
+		// Buffer should be empty now
+		_, ok := rb.TryGet()
+		if ok {
+			t.Error("buffer should be empty after GetAll")
+		}
+	})
+
+	t.Run("PartiallyFullWrapped", func(t *testing.T) {
+		rb := New[int](3)
+		defer rb.Stop()
+		rb.Add(1)
+		rb.Add(2)
+		rb.Add(3)    // Buffer is full: [1, 2, 3], tail=0, head=0
+		rb.Add(4)    // Overwrites 1. Buffer: [4, 2, 3], tail=1, head=1
+		_ = rb.Get() // Consume 2. Buffer has [4, 3], tail=2, head=1
+
+		items := rb.GetAll()
+		expected := []int{3, 4} // Oldest is 3, then 4
+		if !reflect.DeepEqual(items, expected) {
+			t.Errorf("expected %v from wrapped buffer, got %v", expected, items)
+		}
+		// Buffer should be empty now
+		_, ok := rb.TryGet()
+		if ok {
+			t.Error("buffer should be empty after GetAll")
+		}
+	})
+
+	t.Run("DoesNotTriggerCleanup", func(t *testing.T) {
+		cleanedUp := make(chan int, 1)
+		r1 := &resource{ID: 1, cleanedUp: cleanedUp}
+
+		rb := New[*resource](5)
+		defer rb.Stop()
+
+		rb.Add(r1)
+		_ = rb.GetAll() // This should NOT trigger cleanup
+
+		select {
+		case id := <-cleanedUp:
+			t.Errorf("GetAll should not trigger cleanup, but it did for ID %d", id)
+		case <-time.After(50 * time.Millisecond):
+			// This is the expected behavior, nothing was cleaned up.
+		}
+	})
+}
