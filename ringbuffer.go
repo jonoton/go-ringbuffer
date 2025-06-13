@@ -66,6 +66,13 @@ func (rb *RingBuffer[T]) Get() T {
 	return <-rb.getChan
 }
 
+// GetChan returns a receive-only channel for retrieving items.
+// This is useful for integrating with 'select' statements to handle multiple
+// event sources concurrently.
+func (rb *RingBuffer[T]) GetChan() <-chan T {
+	return rb.getChan
+}
+
 // TryGet attempts to retrieve an item from the ring buffer without blocking.
 // If the buffer is not empty, it returns the oldest item and true.
 // If the buffer is empty, it returns the zero value for the type and false.

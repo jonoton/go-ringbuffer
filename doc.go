@@ -31,6 +31,24 @@ until an item is available:
 		fmt.Println(item1, item2)
 	}()
 
+Advanced Usage with Select:
+
+For more complex consumers that need to handle multiple event sources (e.g.,
+data channels and quit signals), you can use the GetChan() method. It returns
+a receive-only channel that can be used directly in a `select` statement.
+
+	quit := make(chan struct{})
+	// ...
+	for {
+		select {
+		case item := <-rb.GetChan():
+			fmt.Printf("Received item: %v\n", item)
+		case <-quit:
+			fmt.Println("Quit signal received.")
+			return
+		}
+	}
+
 Non-Blocking and Batch Operations:
 
 The buffer also provides non-blocking and batch retrieval methods.

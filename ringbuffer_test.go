@@ -447,3 +447,44 @@ func TestGetAll(t *testing.T) {
 		}
 	})
 }
+
+// --- Test for GetChan ---
+
+func TestGetChan(t *testing.T) {
+	rb := New[int](5)
+	defer rb.Stop()
+
+	quit := make(chan struct{})
+	itemsReceived := make(chan int)
+
+	// Consumer goroutine
+	go func() {
+		for {
+			select {
+			case item := <-rb.GetChan():
+				itemsReceived <- item
+			case <-quit:
+				return
+			}
+		}
+	}()
+
+	// Producer
+	rb.Add(1)
+	rb.Add(2)
+
+	// Verify items are received
+	for i := 1; i <= 2; i++ {
+		select {
+		case item := <-itemsReceived:
+			if item != i {
+				t.Errorf("expected to receive %d, but got %d", i, item)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("timed out waiting for item %d", i)
+		}
+	}
+
+	// Verify that the consumer loop can be quit
+	close(quit)
+}
