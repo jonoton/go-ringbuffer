@@ -32,7 +32,8 @@ type RingBuffer[T any] struct {
 	getChan    chan T
 	tryGetChan chan chan tryGetResponse[T] // Channel for non-blocking get requests
 	getAllChan chan chan []T               // Channel for getting all items
-	done       chan struct{}
+	cancel     chan struct{}
+	done       chan bool
 }
 
 // New creates a new RingBuffer with the given size. If the provided size
@@ -47,7 +48,8 @@ func New[T any](size int) *RingBuffer[T] {
 		getChan:    make(chan T),
 		tryGetChan: make(chan chan tryGetResponse[T]),
 		getAllChan: make(chan chan []T),
-		done:       make(chan struct{}),
+		cancel:     make(chan struct{}),
+		done:       make(chan bool),
 	}
 
 	go rb.run()
@@ -96,13 +98,15 @@ func (rb *RingBuffer[T]) GetAll() []T {
 // Stop gracefully shuts down the ring buffer's background goroutine.
 // It will also call Cleanup() on any remaining items that implement the Cleanable interface.
 func (rb *RingBuffer[T]) Stop() {
-	close(rb.done)
+	close(rb.cancel)
+	<-rb.done
 }
 
 // run is the core loop that serializes access to the buffer.
 // It uses a nil channel to disable the 'get' case when the buffer is empty,
-// preventing deadlocks and ensuring the 'done' signal is always received.
+// preventing deadlocks and ensuring the 'cancel' signal is always received.
 func (rb *RingBuffer[T]) run() {
+	defer close(rb.done)
 	var outputChan chan T
 	var currentItem T
 
@@ -187,7 +191,7 @@ func (rb *RingBuffer[T]) run() {
 
 			respChan <- items
 
-		case <-rb.done:
+		case <-rb.cancel:
 			// A 'Stop' request was received.
 			// Clean up any remaining items in the buffer before exiting.
 			if rb.isFull {
