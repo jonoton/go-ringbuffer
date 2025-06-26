@@ -207,6 +207,7 @@ func (rb *RingBuffer[T]) run() {
 					}
 				}
 			}
+			close(rb.getChan)
 			return
 		}
 	}
